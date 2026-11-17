@@ -41,6 +41,12 @@ button{
 }
 button.on{background:var(--ink);color:var(--bg);border-color:var(--ink)}
 .spacer{flex:1}
+.opts{display:none;align-items:center;gap:10px 14px;flex-wrap:wrap;margin:-2px 0 10px;font-size:12px;color:var(--muted)}
+.opts.show{display:flex}
+.opts label{display:flex;align-items:center;gap:8px;margin:0;flex:1 1 140px}
+.opts input[type=range]{flex:1;width:auto;min-width:0;accent-color:var(--accent);padding:0;border:0;background:none}
+.opts output{min-width:52px;color:var(--ink);font-weight:600;font-variant-numeric:tabular-nums}
+.opts button{padding:6px 10px;font-size:12px}
 #board{
   position:relative;width:100%;aspect-ratio:1;border:1px dashed var(--line);border-radius:16px;
   touch-action:none;overflow:hidden;user-select:none;-webkit-user-select:none
@@ -89,6 +95,15 @@ button.on{background:var(--ink);color:var(--bg);border-color:var(--ink)}
   <button id="clear">Clear</button>
 </div>
 
+<div class="opts" id="opt-spiral">
+  <label>Turns <input type="range" id="turns" min="0.5" max="5" step="0.25" value="2"><output id="turnsOut"></output></label>
+  <label>Noise <input type="range" id="noise" min="0" max="100" step="5" value="0"><output id="noiseOut"></output></label>
+</div>
+<div class="opts" id="opt-scatter">
+  <button data-gather="0" class="on">Loose</button>
+  <button data-gather="1">Gather</button>
+</div>
+
 <div id="board"><div id="hint">Type the fodder above</div></div>
 <div id="slots"></div>
 
@@ -97,7 +112,13 @@ const $ = s => document.querySelector(s);
 const board = $('#board'), slotsEl = $('#slots'), hint = $('#hint');
 const fodderIn = $('#fodder'), patIn = $('#pattern'), countEl = $('#count');
 
-let tiles = [], slots = [], layout = 'circle';
+let tiles = [], slots = [];
+
+// remembered per device; page works fine without storage
+const settings = { layout: 'circle', turns: 2, noise: 0, gather: 0 };
+try { Object.assign(settings, JSON.parse(localStorage.getItem('anagram-settings') || '{}')); } catch (e) {}
+const save = () => { try { localStorage.setItem('anagram-settings', JSON.stringify(settings)); } catch (e) {} };
+let layout = settings.layout;
 
 const shuffle = a => { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; };
 const letters = s => s.toUpperCase().replace(/[^A-Z]/g, '').split('');
@@ -140,7 +161,8 @@ function build() {
     board.appendChild(el); t.el = el;
   });
   buildSlots();
-  arrange();
+  roll = null;
+  arrange(false);
   render();
 }
 
@@ -149,19 +171,56 @@ function circle(n) {
   const r = n === 1 ? 0 : .38, off = Math.random() * Math.PI * 2;
   return Array.from({ length: n }, (_, i) => [.5 + r * Math.cos(off + i * 2 * Math.PI / n), .5 + r * Math.sin(off + i * 2 * Math.PI / n)]);
 }
+// Archimedean spiral r = theta, from the centre out to `turns` full turns.
+// Letters sit at equal arc-length steps, so spacing adapts to the fodder length.
+// Noise nudges each letter along the curve and in/out across it, by a fixed per-shuffle random amount.
 function spiral(n) {
-  const s = 52 / (board.clientWidth || 360), b = s / (2 * Math.PI);
-  const dir = Math.random() < .5 ? 1 : -1, off = Math.random() * Math.PI * 2;
-  const pts = [[0, 0]];
-  let th = 2 * Math.PI;
-  while (pts.length < n) {
-    const r = b * th;
-    pts.push([r * Math.cos(dir * th + off), r * Math.sin(dir * th + off)]);
-    th += s / r;
+  const T = settings.turns, nz = settings.noise / 100;
+  const thMax = 2 * Math.PI * T, M = 1500;
+  const th = [], L = [0];
+  for (let k = 0; k <= M; k++) th.push(thMax * k / M);
+  for (let k = 1; k <= M; k++) L.push(L[k - 1] + Math.hypot(1, (th[k] + th[k - 1]) / 2) * (th[k] - th[k - 1]));
+  const Ltot = L[M], ds = n > 1 ? Ltot / (n - 1) : 0;
+  const thetaAt = s => {
+    s = Math.max(0, Math.min(Ltot, s));
+    let lo = 0, hi = M;
+    while (hi - lo > 1) { const m = (lo + hi) >> 1; L[m] < s ? lo = m : hi = m; }
+    const f = (s - L[lo]) / ((L[hi] - L[lo]) || 1);
+    return th[lo] + f * (th[hi] - th[lo]);
+  };
+  const ring = 2 * Math.PI;                      // gap between successive turns
+  const k = .42 / (thMax + nz * ring * .5);      // keep noisy outer letters on the board
+  return Array.from({ length: n }, (_, i) => {
+    const [ja, jr] = roll.jit[i];
+    const t = thetaAt(i * ds + ja * nz * .45 * ds);
+    const r = Math.max(0, t + jr * nz * .5 * ring);
+    const a = roll.dir * t + roll.off;
+    let x = r * Math.cos(a), y = r * Math.sin(a);
+    if (i === 0 && n > 1) { x += ja * nz * ring * .5; y += jr * nz * ring * .5; }   // centre letter: plain wobble
+    return [.5 + x * k, .5 + y * k];
+  });
+}
+// Pull scattered points toward the centre while pushing apart any that are too close,
+// so they settle into a loose clump with roughly even gaps.
+function gather(pts) { return relax(pts, 60, .04, 300, true); }
+// push apart letters closer than `gapPx`; `pull` > 0 also draws everything toward the centre
+function relax(pts, gapPx, pull, iters, recentre) {
+  const W = board.clientWidth || 360, d = gapPx / W;
+  pts = pts.map(p => p.slice());
+  for (let it = 0; it < iters; it++) {
+    if (pull) for (const p of pts) { p[0] += (.5 - p[0]) * pull; p[1] += (.5 - p[1]) * pull; }
+    for (let i = 0; i < pts.length; i++) for (let j = i + 1; j < pts.length; j++) {
+      const a = pts[i], b = pts[j];
+      let dx = b[0] - a[0], dy = b[1] - a[1], dist = Math.hypot(dx, dy);
+      if (dist >= d) continue;
+      if (dist < 1e-6) { dx = Math.random() - .5; dy = Math.random() - .5; dist = Math.hypot(dx, dy); }
+      const push = (d - dist) / 2 / dist;
+      a[0] -= dx * push; a[1] -= dy * push; b[0] += dx * push; b[1] += dy * push;
+    }
   }
-  const maxR = Math.max(...pts.map(([x, y]) => Math.hypot(x, y)));
-  const k = maxR > .42 ? .42 / maxR : 1;
-  return pts.map(([x, y]) => [.5 + x * k, .5 + y * k]);
+  if (!recentre) return pts;
+  const cx = pts.reduce((s, p) => s + p[0], 0) / pts.length, cy = pts.reduce((s, p) => s + p[1], 0) / pts.length;
+  return pts.map(([x, y]) => [Math.min(.92, Math.max(.08, x - cx + .5)), Math.min(.92, Math.max(.08, y - cy + .5))]);
 }
 function scatter(n) {
   let d = 58 / (board.clientWidth || 360);
@@ -174,13 +233,36 @@ function scatter(n) {
   }
   return pts;
 }
-function arrange() {
+// A "roll" fixes the random choices (letter order, orientation, noise, scatter spots)
+// so sliders can reshape the layout live without reshuffling every tick.
+let roll = null, gatherTimer = null;
+function reroll() {
+  const n = tiles.length;
+  roll = {
+    order: shuffle([...Array(n).keys()]),
+    off: Math.random() * Math.PI * 2,
+    dir: Math.random() < .5 ? 1 : -1,
+    jit: Array.from({ length: n }, () => [Math.random() * 2 - 1, Math.random() * 2 - 1]),
+    rot: Array.from({ length: n }, () => Math.random() * 2 - 1),
+    loose: scatter(n),
+    circle: circle(n),
+  };
+}
+function place_(pts, tilt) {
+  roll.order.forEach((ti, i) => { const t = tiles[ti]; [t.x, t.y] = pts[i]; t.rot = roll.rot[i] * tilt; });
+}
+function arrange(animate) {
+  clearTimeout(gatherTimer);
   const n = tiles.length; if (!n) return;
-  const pts = layout === 'circle' ? circle(n) : layout === 'spiral' ? spiral(n) : scatter(n);
-  shuffle(tiles.slice()).forEach((t, i) => {
-    [t.x, t.y] = pts[i];
-    t.rot = layout === 'scatter' ? Math.random() * 36 - 18 : Math.random() * 12 - 6;
-  });
+  if (!roll || roll.order.length !== n) reroll();
+  if (layout === 'circle') place_(roll.circle, 6);
+  else if (layout === 'spiral') place_(settings.noise > 0 ? relax(spiral(n), 40, 0, 40, false) : spiral(n), 6);
+  else if (!settings.gather) place_(roll.loose, 18);
+  else if (animate) {
+    // show the loose scatter first, then drag it into the middle
+    place_(roll.loose, 18); render();
+    gatherTimer = setTimeout(() => { place_(gather(roll.loose), 18); render(); }, 450);
+  } else place_(gather(roll.loose), 18);
 }
 
 // ---- rendering ----
@@ -272,12 +354,30 @@ function onDown(e) {
 fodderIn.addEventListener('input', build);
 patIn.addEventListener('input', () => { buildSlots(); render(); });
 [fodderIn, patIn].forEach(i => i.addEventListener('keydown', e => { if (e.key === 'Enter') i.blur(); }));
+function syncControls() {
+  document.querySelectorAll('[data-layout]').forEach(x => x.classList.toggle('on', x.dataset.layout === layout));
+  document.querySelectorAll('[data-gather]').forEach(x => x.classList.toggle('on', +x.dataset.gather === +settings.gather));
+  $('#opt-spiral').classList.toggle('show', layout === 'spiral');
+  $('#opt-scatter').classList.toggle('show', layout === 'scatter');
+  $('#turns').value = settings.turns; $('#noise').value = settings.noise;
+  $('#turnsOut').textContent = (+settings.turns) + (settings.turns == 1 ? ' turn' : ' turns');
+  $('#noiseOut').textContent = settings.noise + '%';
+}
 document.querySelectorAll('[data-layout]').forEach(b => b.addEventListener('click', () => {
-  layout = b.dataset.layout;
-  document.querySelectorAll('[data-layout]').forEach(x => x.classList.toggle('on', x === b));
-  arrange(); render();
+  layout = settings.layout = b.dataset.layout; save(); syncControls();
+  if (tiles.length) reroll();
+  arrange(true); render();
 }));
-$('#shuffle').addEventListener('click', () => { arrange(); render(); });
+document.querySelectorAll('[data-gather]').forEach(b => b.addEventListener('click', () => {
+  settings.gather = +b.dataset.gather; save(); syncControls();
+  arrange(true); render();     // same scatter, now loose or gathered
+}));
+['turns', 'noise'].forEach(id => $('#' + id).addEventListener('input', e => {
+  settings[id] = +e.target.value; save(); syncControls();
+  arrange(false); render();    // reshape live, same letters
+}));
+$('#shuffle').addEventListener('click', () => { if (tiles.length) reroll(); arrange(true); render(); });
+syncControls();
 $('#clear').addEventListener('click', () => { buildSlots(); render(); });
 </script>
 </body>
