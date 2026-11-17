@@ -1,0 +1,284 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Anagram">
+<meta name="theme-color" content="#f6f3ec">
+<title>Anagram Scratchpad</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Caveat:wght@600&family=Inter:wght@400;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#f6f3ec; --ink:#1d1d1f; --muted:#8a857a; --line:#d9d3c6;
+  --field:#fffdf8; --accent:#c0392b; --hl:rgba(192,57,43,.12);
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#17171a; --ink:#ece9e2; --muted:#8d8a84; --line:#34343a;
+    --field:#202024; --accent:#ff6b5b; --hl:rgba(255,107,91,.15);
+  }
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--ink);font-family:Inter,system-ui,sans-serif}
+body{padding:16px 16px calc(16px + env(safe-area-inset-bottom));max-width:480px;margin:0 auto}
+h1{font-size:15px;font-weight:600;letter-spacing:.02em;margin:0 0 12px;color:var(--muted);text-transform:uppercase}
+label{display:block;font-size:12px;color:var(--muted);margin:0 0 4px}
+input{
+  width:100%;font:600 18px Inter,system-ui,sans-serif;letter-spacing:.08em;text-transform:uppercase;
+  padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--field);color:var(--ink);outline:none
+}
+input:focus{border-color:var(--accent)}
+input::placeholder{color:var(--muted);letter-spacing:.02em;text-transform:none;font-weight:400}
+.fields{display:grid;grid-template-columns:3fr 2fr;gap:10px}
+.count{font-size:12px;color:var(--muted);margin:6px 0 10px;min-height:16px}
+.count .bad{color:var(--accent)}
+.bar{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px}
+button{
+  font:600 13px Inter,system-ui,sans-serif;padding:8px 12px;border-radius:999px;cursor:pointer;
+  border:1px solid var(--line);background:var(--field);color:var(--ink)
+}
+button.on{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+.spacer{flex:1}
+#board{
+  position:relative;width:100%;aspect-ratio:1;border:1px dashed var(--line);border-radius:16px;
+  touch-action:none;overflow:hidden;user-select:none;-webkit-user-select:none
+}
+#hint{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:14px;pointer-events:none}
+.tile{
+  position:absolute;width:48px;height:48px;margin:-24px 0 0 -24px;display:flex;align-items:center;justify-content:center;
+  font:600 38px/1 Caveat,cursive;color:var(--ink);cursor:grab;touch-action:none;
+  -webkit-user-select:none;user-select:none;-webkit-touch-callout:none;
+  transition:left .35s ease,top .35s ease,opacity .2s,transform .35s ease
+}
+.tile.used{opacity:.15;cursor:default}
+.tile.drag{transition:none;z-index:10;color:var(--accent);cursor:grabbing}
+#slots{display:flex;flex-wrap:wrap;gap:6px 4px;justify-content:center;margin-top:16px;min-height:52px}
+.slot{
+  width:clamp(22px,7.5vw,36px);height:48px;border-bottom:2.5px solid var(--ink);
+  display:flex;align-items:flex-end;justify-content:center;padding-bottom:2px;
+  font:600 34px/1 Caveat,cursive;color:var(--ink);cursor:pointer;border-radius:4px 4px 0 0
+}
+.slot.gap{margin-right:16px}
+.slot.fixed{color:var(--accent);cursor:default}
+.slot.over{background:var(--hl)}
+</style>
+</head>
+<body>
+<h1>Anagram scratchpad</h1>
+
+<div class="fields">
+  <div>
+    <label for="fodder">Fodder</label>
+    <input id="fodder" placeholder="e.g. dormitory" autocomplete="off" autocapitalize="characters" spellcheck="false" enterkeyhint="done">
+  </div>
+  <div>
+    <label for="pattern">Answer</label>
+    <input id="pattern" placeholder="4,5 or _A__E" autocomplete="off" autocapitalize="characters" spellcheck="false" enterkeyhint="done">
+  </div>
+</div>
+<div class="count" id="count"></div>
+
+<div class="bar">
+  <button data-layout="circle" class="on">Circle</button>
+  <button data-layout="spiral">Spiral</button>
+  <button data-layout="scatter">Scatter</button>
+  <span class="spacer"></span>
+  <button id="shuffle">Shuffle</button>
+  <button id="clear">Clear</button>
+</div>
+
+<div id="board"><div id="hint">Type the fodder above</div></div>
+<div id="slots"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+const board = $('#board'), slotsEl = $('#slots'), hint = $('#hint');
+const fodderIn = $('#fodder'), patIn = $('#pattern'), countEl = $('#count');
+
+let tiles = [], slots = [], layout = 'circle';
+
+const shuffle = a => { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; };
+const letters = s => s.toUpperCase().replace(/[^A-Z]/g, '').split('');
+
+// Answer field: blank = one slot per fodder letter; "4,5" = enumeration; "_A__E" = pattern with known crossers
+function parsePattern(p, n) {
+  p = p.trim().toUpperCase();
+  const out = [];
+  if (!p) { for (let i = 0; i < n; i++) out.push({ fixed: null, tile: null, gap: false }); return out; }
+  if (/^[\d\s,\-]+$/.test(p)) {
+    const groups = p.split(/[\s,\-]+/).filter(Boolean).map(Number);
+    groups.forEach((g, gi) => { for (let i = 0; i < g; i++) out.push({ fixed: null, tile: null, gap: i === g - 1 && gi < groups.length - 1 }); });
+    return out;
+  }
+  for (const c of p) {
+    if (/[\s,\-\/]/.test(c)) { if (out.length) out[out.length - 1].gap = true; continue; }
+    out.push({ fixed: /[A-Z]/.test(c) ? c : null, tile: null, gap: false });
+  }
+  return out;
+}
+
+function buildSlots() {
+  tiles.forEach(t => t.used = false);
+  slots = parsePattern(patIn.value, tiles.length);
+  // known crossers use up a matching fodder letter
+  slots.forEach(s => {
+    if (!s.fixed) return;
+    const t = tiles.find(t => !t.used && t.ch === s.fixed);
+    if (t) { t.used = true; s.tile = t.id; }
+  });
+}
+
+function build() {
+  tiles = letters(fodderIn.value).map((ch, id) => ({ id, ch, used: false, x: .5, y: .5, rot: 0 }));
+  board.querySelectorAll('.tile').forEach(e => e.remove());
+  tiles.forEach(t => {
+    const el = document.createElement('div');
+    el.className = 'tile'; el.textContent = t.ch; el.dataset.id = t.id;
+    el.addEventListener('pointerdown', onDown);
+    board.appendChild(el); t.el = el;
+  });
+  buildSlots();
+  arrange();
+  render();
+}
+
+// ---- layouts (positions are fractions of the board) ----
+function circle(n) {
+  const r = n === 1 ? 0 : .38, off = Math.random() * Math.PI * 2;
+  return Array.from({ length: n }, (_, i) => [.5 + r * Math.cos(off + i * 2 * Math.PI / n), .5 + r * Math.sin(off + i * 2 * Math.PI / n)]);
+}
+function spiral(n) {
+  const s = 52 / (board.clientWidth || 360), b = s / (2 * Math.PI);
+  const dir = Math.random() < .5 ? 1 : -1, off = Math.random() * Math.PI * 2;
+  const pts = [[0, 0]];
+  let th = 2 * Math.PI;
+  while (pts.length < n) {
+    const r = b * th;
+    pts.push([r * Math.cos(dir * th + off), r * Math.sin(dir * th + off)]);
+    th += s / r;
+  }
+  const maxR = Math.max(...pts.map(([x, y]) => Math.hypot(x, y)));
+  const k = maxR > .42 ? .42 / maxR : 1;
+  return pts.map(([x, y]) => [.5 + x * k, .5 + y * k]);
+}
+function scatter(n) {
+  let d = 58 / (board.clientWidth || 360);
+  const pts = [];
+  for (let i = 0; i < n; i++) {
+    let p, tries = 0;
+    do { p = [.09 + Math.random() * .82, .09 + Math.random() * .82]; if (++tries % 150 === 0) d *= .9; }
+    while (pts.some(q => Math.hypot(q[0] - p[0], q[1] - p[1]) < d));
+    pts.push(p);
+  }
+  return pts;
+}
+function arrange() {
+  const n = tiles.length; if (!n) return;
+  const pts = layout === 'circle' ? circle(n) : layout === 'spiral' ? spiral(n) : scatter(n);
+  shuffle(tiles.slice()).forEach((t, i) => {
+    [t.x, t.y] = pts[i];
+    t.rot = layout === 'scatter' ? Math.random() * 36 - 18 : Math.random() * 12 - 6;
+  });
+}
+
+// ---- rendering ----
+function renderTile(t) {
+  t.el.style.left = (t.x * 100) + '%';
+  t.el.style.top = (t.y * 100) + '%';
+  t.el.style.transform = `rotate(${t.rot}deg)`;
+  t.el.classList.toggle('used', t.used);
+}
+function renderSlots() {
+  slotsEl.innerHTML = '';
+  slots.forEach((s, i) => {
+    const d = document.createElement('div');
+    d.className = 'slot' + (s.fixed ? ' fixed' : '') + (s.gap ? ' gap' : '');
+    d.dataset.i = i;
+    d.textContent = s.fixed || (s.tile != null ? tiles[s.tile].ch : '');
+    d.addEventListener('click', () => {
+      if (s.fixed || s.tile == null) return;
+      tiles[s.tile].used = false; s.tile = null; render();
+    });
+    slotsEl.appendChild(d);
+  });
+}
+function renderCount() {
+  const n = tiles.length, m = slots.length;
+  if (!n) { countEl.innerHTML = ''; return; }
+  countEl.innerHTML = patIn.value.trim()
+    ? `${n} letters · answer ${m}` + (n !== m ? ` <span class="bad">(${n > m ? n - m + ' spare' : m - n + ' short'})</span>` : '')
+    : `${n} letters`;
+}
+function render() {
+  hint.style.display = tiles.length ? 'none' : 'flex';
+  tiles.forEach(renderTile);
+  renderSlots();
+  renderCount();
+}
+
+// ---- placing letters ----
+const nextEmpty = () => { const i = slots.findIndex(s => !s.fixed && s.tile == null); return i < 0 ? null : i; };
+function place(t, i) {
+  const s = slots[i];
+  if (!s || s.fixed) return;
+  if (s.tile != null) tiles[s.tile].used = false;
+  s.tile = t.id; t.used = true;
+}
+function slotAt(x, y) {
+  const els = slotsEl.querySelectorAll('.slot');
+  for (const el of els) {
+    const r = el.getBoundingClientRect(), pad = 10;
+    if (x >= r.left - pad && x <= r.right + pad && y >= r.top - pad && y <= r.bottom + pad) return el;
+  }
+  return null;
+}
+
+function onDown(e) {
+  const el = e.currentTarget, t = tiles[el.dataset.id];
+  if (t.used) return;
+  e.preventDefault();
+  el.setPointerCapture(e.pointerId);
+  const sx = e.clientX, sy = e.clientY;
+  let moved = false, over = null;
+  el.classList.add('drag');
+
+  const move = ev => {
+    const dx = ev.clientX - sx, dy = ev.clientY - sy;
+    if (Math.hypot(dx, dy) > 6) moved = true;
+    el.style.transform = `translate(${dx}px,${dy}px) rotate(${t.rot}deg) scale(1.25)`;
+    const s = slotAt(ev.clientX, ev.clientY);
+    if (s !== over) { over && over.classList.remove('over'); over = s; over && over.classList.add('over'); }
+  };
+  const up = ev => {
+    el.removeEventListener('pointermove', move);
+    el.removeEventListener('pointerup', up);
+    el.removeEventListener('pointercancel', up);
+    el.classList.remove('drag');
+    over && over.classList.remove('over');
+    if (ev.type === 'pointerup') {
+      if (moved) { const s = slotAt(ev.clientX, ev.clientY); if (s) place(t, +s.dataset.i); }
+      else { const i = nextEmpty(); if (i != null) place(t, i); }   // tap = next empty slot
+    }
+    render();
+  };
+  el.addEventListener('pointermove', move);
+  el.addEventListener('pointerup', up);
+  el.addEventListener('pointercancel', up);
+}
+
+// ---- controls ----
+fodderIn.addEventListener('input', build);
+patIn.addEventListener('input', () => { buildSlots(); render(); });
+[fodderIn, patIn].forEach(i => i.addEventListener('keydown', e => { if (e.key === 'Enter') i.blur(); }));
+document.querySelectorAll('[data-layout]').forEach(b => b.addEventListener('click', () => {
+  layout = b.dataset.layout;
+  document.querySelectorAll('[data-layout]').forEach(x => x.classList.toggle('on', x === b));
+  arrange(); render();
+}));
+$('#shuffle').addEventListener('click', () => { arrange(); render(); });
+$('#clear').addEventListener('click', () => { buildSlots(); render(); });
+</script>
+</body>
+</html>
